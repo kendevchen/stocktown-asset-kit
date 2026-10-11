@@ -25,7 +25,6 @@
 | `town-kit.js` | 素材包：街景、方塊小人、九種店面、店面零件、欄杆、日夜切換 |
 | `town-sim.js` | 人流與車流模擬 |
 | `stocks.config.json` | 股票清單：代號、名稱、類型、店面樣式、代表色 |
-| `scripts/fetch-twse.mjs` | 抓臺灣證券交易所的每日行情與三大法人，更新 `data/stocks.json` |
 | `data/stocks.json` | 資料（目前是示範資料） |
 | `.github/workflows/update.yml` | 自動更新的工作流程（排程預設關閉） |
 
