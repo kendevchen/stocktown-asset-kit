@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b111b">
+<title>台股小鎮｜每日收盤的成交與法人買賣</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Outfit:wght@400;500;600;800&display=swap">
+<!--
+============================ 開發筆記 ============================
+專案：台股小鎮。每檔股票或 ETF 一間店；人潮依成交金額縮放；門口右邊隊伍＝三大法人買進金額、左邊＝賣出金額。
+素材：town-kit.js（街景、方塊小人、店面、欄杆）。股票清單與店面樣式直接寫在 data/stocks.json 的每筆資料裡（code、name、kind、style、color）。
+資料：data/stocks.json，本 repo 附的是示範資料；請自行接上資料來源後產生同樣格式的檔案。
+      格式 { meta:{ source:'sample'|其他, as_of, limitDown:{ date, stocks, market } }, stocks:[ { code, name, kind, style, color,
+      shares(發行股數，用來算市值),
+      daily:[ { date, volume(股), value(元), open, high, low, close, change, trades } ], inst:{ date, buy, sell, net }(股) } ] }
+換算：店面順序＝成交金額排名；路人 4～18 人（成交金額平方根）；兩條隊伍 3～48 人（法人買進／賣出股數 × 收盤價的平方根）。
+模擬：town-sim.js。路人經過右前角排買方、左前角排賣方；叫號間隔 7～2.2 秒（成交筆數平方根）；排頭進店、從中間走道出來。
+      車流每個街廓 1～4 台（成交金額）。街區 5×3＝11 間店＋正中心公園＋NVIDIA 預留空地＋2 個備用格（createStreet 的 parks 參數）。播放速度 1／10／30／60 倍，可暫停。
+招牌：每間店左前街角一支灰色電子招牌（addPylon），共用幾何與材質、每店只換貼圖；顯示名稱、市值（發行股數 × 收盤價）、收盤價。
+時間：clk.hour 隨模擬時間前進（1× 為真實時間），可 ±1 小時、關閉日夜循環；applyTime() 依太陽高度混合夜晚／黃昏／白天。
+快門：town-sim 記錄每台車最近 150 個位置，畫成頭燈白、尾燈紅光帶，依曝光秒數（0／0.6／1.8／4）淡出。
+顏色：紅漲綠跌。招牌只放文字名稱，不放 logo。
+==================================================================
+-->
+<style>
+:root{
+  --bg:#0b111b; --panel:rgba(13,18,24,.76); --line:rgba(255,255,255,.09); --text:#EDF2F5; --muted:#8B99A5;
+  --cyan:#5ED3EF; --up:#ff4d4f; --down:#22b35e; --flat:#aab4bd;
+  --sans:"Outfit","PingFang TC","Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --st:env(safe-area-inset-top,0px); --sb:env(safe-area-inset-bottom,0px); --sl:env(safe-area-inset-left,0px); --sr:env(safe-area-inset-right,0px);
+  color-scheme:dark; box-sizing:border-box;
+}
+*,*::before,*::after{box-sizing:inherit}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;touch-action:none}
+.vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(90% 70% at 0% 0%,rgba(4,7,11,.62),transparent 60%),linear-gradient(to top,rgba(4,7,11,.55),transparent 30%)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
+.label{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--muted)}
+.up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--flat)}
+#brand{position:fixed;left:calc(var(--sl) + 28px);top:calc(var(--st) + 24px);max-width:380px;pointer-events:none}
+.t-small{font-weight:800;font-size:18px}
+.t-big{margin:2px 0 0;font-weight:800;font-size:46px;line-height:1.05;color:var(--cyan)}
+.lead{margin:10px 0 0;color:#c4cdd4;font-size:14px;line-height:1.65}
+#board{position:fixed;right:calc(var(--sr) + 22px);top:calc(var(--st) + 22px);width:344px;padding:12px 12px 10px}
+.mtip{display:none}
+.board-head{display:flex;align-items:center;justify-content:space-between;padding:0 4px 8px}
+.nav{display:flex;align-items:center;gap:6px}
+.nav button{all:unset;cursor:pointer;width:30px;height:26px;display:grid;place-items:center;border-radius:8px;background:rgba(255,255,255,.06);font-size:14px}
+.nav button:hover{background:rgba(255,255,255,.12)}
+#counter{font-family:var(--mono);font-size:12px;min-width:44px;text-align:center}
+#rank{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.row{all:unset;box-sizing:border-box;display:grid;grid-template-columns:20px 8px 1fr 70px 64px;align-items:center;gap:8px;width:100%;padding:6px;border-radius:8px;cursor:pointer;font-size:13px}
+.row:hover{background:rgba(255,255,255,.05)}
+.row[aria-current="true"]{background:rgba(94,211,239,.13)}
+.nav button:focus-visible,.row:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+.r-rank,.r-val,.r-pct{font-family:var(--mono);font-size:11.5px}
+.r-rank{color:var(--muted)} .r-val{text-align:right;color:#c9d2d9} .r-pct{text-align:right}
+.r-dot{width:8px;height:8px;border-radius:50%}
+.r-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#card,#parkInfo{position:fixed;left:calc(var(--sl) + 22px);bottom:calc(var(--sb) + 22px);width:370px;padding:16px 18px 14px}
+.card-head{display:flex;justify-content:space-between;align-items:center}
+.chip{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.2);color:#c9d2d9}
+.chip.sample{border-color:rgba(245,164,69,.5);color:#F5A445}
+.card-name{display:flex;align-items:baseline;gap:10px;margin-top:8px}
+.card-name h2{margin:0;font-size:26px;font-weight:800}
+.card-tools{display:flex;align-items:center;gap:6px}
+#cToggle{all:unset;cursor:pointer;width:28px;height:24px;display:grid;place-items:center;border-radius:8px;background:rgba(255,255,255,.06);font-size:13px;transition:transform .2s}
+#cToggle:hover{background:rgba(255,255,255,.12)}
+#cToggle:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+#cMini{display:none;margin-left:auto;white-space:nowrap}
+#card.collapsed #cBody{display:none}
+#card.collapsed #cMini{display:inline}
+#card.collapsed #cToggle{transform:rotate(180deg)}
+#card.collapsed .card-name{margin-top:4px}
+#card.collapsed .card-name h2{font-size:20px}
+.card-kpi{display:flex;align-items:flex-end;gap:14px;margin-top:10px}
+.kpi-num{font-family:var(--mono);font-weight:500;font-size:40px;line-height:.95}
+.kpi-side{display:flex;flex-direction:column;gap:4px;padding-bottom:2px}
+.chg{font-family:var(--mono);font-size:13px;font-weight:500}
+#spark{display:block;width:100%;height:46px;margin-top:12px}
+.spark-axis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:4px}
+.card-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.card-stats div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.card-stats b{font-family:var(--mono);font-weight:500;font-size:12.5px;white-space:nowrap}
+.inst{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:12.5px}
+.inst-bar{display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:6px;background:rgba(255,255,255,.08)}
+.inst-bar i{display:block;height:100%}
+#iBuy{background:var(--up)} #iSell{background:var(--down)}
+.inst-legend{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;margin-top:4px}
+#hint{position:fixed;right:calc(var(--sr) + 24px);bottom:calc(var(--sb) + 20px);text-align:right;font-size:12px;line-height:1.8;color:var(--muted);pointer-events:none;max-width:420px}
+#player{position:fixed;right:calc(var(--sr) + 22px);bottom:calc(var(--sb) + 22px);width:340px;padding:12px 14px}
+.pl-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.seg{display:flex;gap:2px;padding:2px;border-radius:9px;background:rgba(255,255,255,.05)}
+.seg button{all:unset;box-sizing:border-box;cursor:pointer;min-width:42px;height:26px;display:grid;place-items:center;border-radius:7px;font-family:var(--mono);font-size:12px;color:#c9d2d9}
+.seg button:hover{background:rgba(255,255,255,.08)}
+.seg button[aria-pressed="true"]{background:#F2F5F7;color:#0d1218}
+.seg button:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+.pl-keys,.pl-src,.pl-note{font-size:11px;line-height:1.7;color:var(--muted)}
+.pl-src{color:#c9d2d9}
+.clock{display:flex;align-items:baseline;gap:8px}
+#clock{font-family:var(--mono);font-size:24px;font-weight:500;line-height:1}
+.pl-btns{display:flex;gap:6px}
+.pl-btns button,.toggle{all:unset;box-sizing:border-box;cursor:pointer;height:26px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.07);font-family:var(--mono);font-size:12px;display:inline-grid;place-items:center;color:var(--text)}
+.pl-btns button:hover,.toggle:hover{background:rgba(255,255,255,.13)}
+.toggle{font-family:var(--sans)}
+.toggle[aria-pressed="true"]{background:rgba(94,211,239,.16);box-shadow:inset 0 0 0 1px rgba(94,211,239,.55)}
+.pl-btns button:focus-visible,.toggle:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+#parkBtn{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;justify-content:space-between;width:100%;margin:0 0 6px;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,.06);font-size:13px}
+#parkBtn:hover{background:rgba(255,255,255,.12)}
+#parkBtn[aria-pressed="true"]{background:rgba(94,211,239,.13)}
+#parkBtn:focus-visible{outline:2px solid var(--cyan);outline-offset:1px}
+#parkBtn small{font-family:var(--mono);font-size:11.5px;color:var(--down)}
+#parkInfo{display:none;padding:16px 18px 14px}
+#parkInfo h2{margin:8px 0 0;font-size:26px;font-weight:800}
+#parkInfo .big{font-family:var(--mono);font-size:40px;line-height:1;margin-top:12px;color:var(--down)}
+#parkInfo p{margin:10px 0 0;font-size:12.5px;line-height:1.7;color:#c9d2d9}
+body.park-mode #card{display:none}
+body.park-mode #parkInfo{display:block}
+#loading{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:var(--bg);color:var(--muted);font-size:14px;text-align:center;padding:24px;transition:opacity .5s}
+#loading.hide{opacity:0;pointer-events:none}
+@media (max-width:760px){
+  #brand{left:calc(var(--sl) + 16px);top:calc(var(--st) + 14px)}
+  .t-small{font-size:13px} .t-big{font-size:28px} .lead{display:none}
+  #board{top:calc(var(--st) + 14px);right:calc(var(--sr) + 12px);width:auto;padding:4px 6px;display:flex;align-items:center;gap:6px} /* 橫幅：全部排成一列 */
+  #board .label,#rank{display:none}
+  #parkBtn{width:auto;margin:0;padding:0 8px;height:26px;font-size:11px;white-space:nowrap;flex:none} #parkBtn small{display:none}
+  .nav{gap:4px} .nav button{width:26px;height:26px} #counter{min-width:30px;font-size:11px}
+  .board-head{padding:0}
+  .mtip{display:block;width:auto;padding:0;font-size:10px;line-height:1.25;letter-spacing:.02em;text-align:left;color:var(--muted);flex:none}
+  #card,#parkInfo{left:calc(var(--sl) + 10px);right:calc(var(--sr) + 10px);bottom:calc(var(--sb) + 10px);width:auto;padding:12px 14px}
+  .kpi-num{font-size:32px} #spark{height:36px}
+  #player{top:calc(var(--st) + 66px);bottom:auto;right:calc(var(--sr) + 12px);width:auto;padding:6px}
+  #player .pl-row{margin:0}
+  #player .label,.pl-keys,.pl-src,.pl-note{display:none}
+  #player .pl-extra,#dayPhase{display:none}
+  #clock{font-size:16px}
+}
+@media (max-width:370px){ #counter{display:none} } /* 窄螢幕：橫幅放不下頁碼時先省略，避免碰到標題 */
+@media (prefers-reduced-motion:reduce){#loading{transition:none}}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="stage" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+<header id="brand">
+  <div class="t-small">每日收盤</div>
+  <h1 class="t-big">台股小鎮</h1>
+  <p class="lead">每檔股票一間店。成交金額越大，街上人潮越多；門口右邊排的是三大法人買進、左邊是賣出。</p>
+</header>
+<aside id="board" class="panel" aria-label="成交金額排行">
+  <div class="mtip">切換<br>個股店面</div>
+  <div class="board-head">
+    <span class="label">成交金額排行</span>
+    <div class="nav">
+      <button id="prev" type="button" aria-label="上一家">←</button>
+      <span id="counter">1 / 4</span>
+      <button id="next" type="button" aria-label="下一家">→</button>
+    </div>
+  </div>
+  <button id="parkBtn" type="button" aria-pressed="false">公園紙箱區<small id="parkCnt"></small></button>
+  <ol id="rank"></ol>
+</aside>
+<section id="card" class="panel" aria-live="polite">
+  <div class="card-head"><span class="label" id="cRank"></span><span class="card-tools"><span class="chip" id="cChip"></span><button id="cToggle" type="button" aria-controls="cBody" aria-expanded="true" aria-label="收合資訊">▾</button></span></div>
+  <div class="card-name"><h2 id="cName">—</h2><span class="label" id="cCode"></span><span class="chg" id="cMini"></span></div>
+  <div id="cBody">
+  <div class="card-kpi">
+    <div class="kpi-num" id="cClose">—</div>
+    <div class="kpi-side"><span class="label">收盤價</span><span class="chg" id="cChg"></span></div>
+  </div>
+  <canvas id="spark" aria-label="近 30 日成交金額"></canvas>
+  <div class="spark-axis"><span id="sFrom"></span><span>近 30 日成交金額（紅漲綠跌）</span><span id="sTo"></span></div>
+  <div class="card-stats">
+    <div><span class="label">成交金額</span><b id="cVal">—</b></div>
+    <div><span class="label">成交量</span><b id="cVol">—</b></div>
+    <div><span class="label">開／高／低</span><b id="cOHL">—</b></div>
+  </div>
+  <div class="inst"><span class="label">三大法人</span><span id="cInst">—</span></div>
+  <div class="inst-bar"><i id="iBuy"></i><i id="iSell"></i></div>
+  <div class="inst-legend"><span class="up" id="lBuy"></span><span class="down" id="lSell"></span></div>
+  </div>
+</section>
+<section id="parkInfo" class="panel" aria-live="polite">
+  <div class="card-head"><span class="label" id="pDate"></span><span class="chip">證交所資料</span></div>
+  <h2>公園紙箱區</h2>
+  <div class="label" style="margin-top:2px">今日股票跌停檔數</div>
+  <div class="big" id="pNum">—</div>
+  <p id="pNote"></p>
+</section>
+<section id="player" class="panel" aria-label="時間與模擬速度">
+  <div class="pl-row">
+    <div class="clock"><span id="clock">21:00</span><span id="dayPhase" class="label">夜晚</span></div>
+    <div class="pl-btns"><button id="hourBack" type="button" aria-label="時間倒退一小時">−1h</button><button id="hourFwd" type="button" aria-label="時間前進一小時">+1h</button><button id="dayNightBtn" type="button" aria-label="切換白天與夜晚">☀ 白天</button></div>
+  </div>
+  <div class="pl-row">
+    <span class="label">模擬速度</span>
+    <div class="seg" id="speedSeg" role="group" aria-label="模擬速度">
+      <button id="playBtn" type="button" aria-label="暫停">❚❚</button><button type="button" data-v="1">1×</button><button type="button" data-v="10">10×</button><button type="button" data-v="30">30×</button><button type="button" data-v="60">60×</button>
+    </div>
+  </div>
+  <div class="pl-row pl-extra">
+    <span class="label">快門</span>
+    <div class="seg" id="shutterSeg" role="group" aria-label="長曝光"><button type="button" data-s="0">關</button><button type="button" data-s="0.6">短</button><button type="button" data-s="1.8">中</button><button type="button" data-s="4">長</button></div>
+    <button id="cycleBtn" class="toggle" type="button" aria-pressed="true">日夜循環</button>
+  </div>
+  <div class="pl-keys">← → 換一家　P 公園　空白鍵 暫停　1–4 速度　− = 調時間　E 快門　N 日夜循環　C 重設視角　中鍵／雙指平移</div>
+  <div class="pl-src" id="src"></div>
+  <div class="pl-note">門口兩條隊伍只代表三大法人，不是全部投資人；進店頻率依成交筆數。僅供參考，不構成投資建議。</div>
+</section>
+<div id="loading"><div id="loadMsg">載入台股小鎮…</div></div>
+
+<script>
+window.__ready = false;
+setTimeout(function () { if (!window.__ready) { var el = document.getElementById('loadMsg'); if (el) el.textContent = '3D 函式庫載入失敗，請確認網路連線後重新整理。'; } }, 15000);
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import * as KIT from './town-kit.js';
+import { createTownSim } from './town-sim.js';
+
+// ==== [設定] ====
+const UP = '#ff4d4f', DOWN = '#22b35e', FLAT = '#aab4bd';
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const $ = s => document.querySelector(s);
+
+// ==== [格式] ====
+const nf = (v, d = 0) => v.toLocaleString('zh-TW', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtPrice = v => (v == null ? '—' : nf(v, v % 1 ? 2 : 0));
+const fmtYi = v => `${nf(v / 1e8, v >= 1e10 ? 0 : 1)} 億`;
+const fmtCap = v => (v == null ? '—' : v >= 1e12 ? `${nf(v / 1e12, 2)} 兆` : `${nf(v / 1e8)} 億`);
+const fmtLots = v => `${nf(Math.round(v / 1000))} 張`;
+const fmtSigned = v => (v > 0 ? '+' : v < 0 ? '−' : '') + nf(Math.abs(v), Math.abs(v) % 1 ? 2 : 0);
+const pctText = p => `${p > 0 ? '▲' : p < 0 ? '▼' : '—'} ${Math.abs(p * 100).toFixed(2)}%`;
+const tone = v => (v > 0 ? 'up' : v < 0 ? 'down' : 'flat');
+
+// ==== [資料] data/stocks.json：換算人潮與隊伍長度 ====
+async function loadData() {
+  const r = await fetch('data/stocks.json', { cache: 'no-store' });
+  if (!r.ok) throw new Error(`讀不到 data/stocks.json（HTTP ${r.status}）`);
+  return r.json();
+}
+function prepare(raw) {
+  const list = raw.stocks.filter(s => s.daily && s.daily.length).map(s => {
+    const d = s.daily, last = d[d.length - 1], prevClose = last.close - (last.change || 0);
+    const recent = d.slice(-30);
+    return { ...s, last, pct: prevClose ? (last.change || 0) / prevClose : 0, series: recent.map(x => x.value), seriesTone: recent.map(x => x.change || 0), seriesDates: recent.map(x => x.date) };
+  }).sort((a, b) => b.last.value - a.last.value);
+  list.forEach((s, i) => { s.rank = i + 1; });
+  const maxVal = Math.max(...list.map(s => s.last.value));
+  const instVal = s => (s.inst ? { buy: s.inst.buy * s.last.close, sell: s.inst.sell * s.last.close } : null); // 股數 × 收盤價＝金額，不同股價才能比較
+  const maxInst = Math.max(1, ...list.map(s => instVal(s)).filter(Boolean).flatMap(v => [v.buy, v.sell]));
+  const maxTrades = Math.max(1, ...list.map(s => s.last.trades || 0));
+  for (const s of list) {
+    const iv = instVal(s);
+    s.walkers = Math.round(4 + 14 * Math.sqrt(s.last.value / maxVal));
+    s.cars = 1 + Math.round(3 * Math.sqrt(s.last.value / maxVal));
+    s.interval = 7 - 4.8 * Math.sqrt((s.last.trades || 0) / maxTrades); // 叫號間隔：成交筆數越多越快（7～2.2 秒）
+    s.qBuy = iv ? Math.round(3 + 45 * Math.sqrt(iv.buy / maxInst)) : 8;
+    s.qSell = iv ? Math.round(3 + 45 * Math.sqrt(iv.sell / maxInst)) : 8;
+    s.instVal = iv;
+    s.cap = s.shares ? s.shares * s.last.close : null; // 市值＝發行股數 × 收盤價
+  }
+  return list;
+}
+function shopInfoFor(s) {
+  const L = s.last;
+  return {
+    name: s.name, color: s.color, title: `${s.code} ${s.name}`, rank: s.rank,
+    rows: [['收盤', fmtPrice(L.close)], ['漲跌', `${fmtSigned(L.change || 0)}（${(s.pct * 100).toFixed(2)}%）`], ['成交金額', fmtYi(L.value)], ['成交量', fmtLots(L.volume)]],
+    tags: [`開 ${fmtPrice(L.open)}`, `高 ${fmtPrice(L.high)}`, `低 ${fmtPrice(L.low)}`], tagLabel: '',
+    big: fmtPrice(L.close), bigLabel: '收盤價', delta: s.pct, deltaLabel: '較前日', series: s.series,
+    upColor: UP, downColor: DOWN,
+    ledHeader: `成交金額第 ${s.rank} 名　${s.code} ${s.name}`, banner: `成交第${s.rank}名`,
+    promo: '今日行情', code: s.code, menuHeader: s.kind === 'ETF' ? 'ETF 行情' : '個股行情',
+    ticker: `${s.code} ${s.name}　收盤 ${fmtPrice(L.close)}　${pctText(s.pct)}　成交金額 ${fmtYi(L.value)}　` + (s.inst ? `三大法人${s.inst.net >= 0 ? '買超' : '賣超'} ${fmtLots(Math.abs(s.inst.net))}` : '') + '　　',
+  };
+}
+
+// ==== [渲染器、場景、燈光、後製] ====
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, matchMedia('(pointer: coarse)').matches ? 1.25 : 1.75));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+$('#stage').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#0b111b');
+scene.fog = new THREE.Fog('#0b111b', 150, 380);
+const camera = new THREE.PerspectiveCamera(22, innerWidth / innerHeight, 1, 900);
+const controls = new OrbitControls(camera, renderer.domElement);
+Object.assign(controls, { enableDamping: true, dampingFactor: 0.08, enablePan: true, screenSpacePanning: false, panSpeed: 0.8, minDistance: 40, maxDistance: 240, minPolarAngle: 0.2, maxPolarAngle: 1.22, rotateSpeed: 0.6 });
+// 平移：滑鼠按住中鍵拖曳；手機雙指拖曳（雙指開合仍是縮放）
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+const hemi = new THREE.HemisphereLight('#4a5f94', '#2b2119', 2.2);
+scene.add(hemi);
+const moon = new THREE.DirectionalLight('#aab9ff', 0.9);
+moon.castShadow = true;
+moon.shadow.mapSize.set(2048, 2048);
+Object.assign(moon.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 1, far: 300 });
+moon.shadow.camera.updateProjectionMatrix();
+moon.shadow.bias = -0.0004;
+moon.shadow.normalBias = 0.03;
+scene.add(moon, moon.target);
+const stageLight = new THREE.PointLight('#ffcf9a', 180, 70, 2);
+scene.add(stageLight);
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.6, 0.55, 0.82);
+composer.addPass(bloom);
+const tiltH = new ShaderPass(KIT.TiltShiftShader), tiltV = new ShaderPass(KIT.TiltShiftShader);
+composer.addPass(tiltH);
+composer.addPass(tiltV);
+composer.addPass(new OutputPass());
+const setTilt = () => { tiltH.uniforms.dir.value.set(1 / innerWidth, 0); tiltV.uniforms.dir.value.set(0, 1 / innerHeight); };
+setTilt();
+
+// ==== [小鎮] 5×3 地塊（11 間店、正中心公園、NVIDIA 預留空地、2 個備用格）；成交金額第 1 名在前排左邊，依序往右、往後 ====
+let raw = null, stocks = [], shops = [], sim = null;
+function smallSign(g, text, color, x, z, k = 1) { // k：放大倍率（k > 1 時貼圖解析度同步加倍，字才不會糊）
+  const q = k > 1 ? 2 : 1;
+  const tex = KIT.canvasTex(256 * q, 96 * q, (c, W, H) => {
+    c.fillStyle = '#10151c'; c.fillRect(0, 0, W, H);
+    c.fillStyle = color; c.fillRect(0, H - 10 * q, W, 10 * q);
+    c.fillStyle = '#ffffff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    KIT.fitText(c, text, W * 0.86, 44 * q, 800); c.fillText(text, W / 2, H * 0.44);
+  });
+  KIT.B(g, 0.06 * Math.sqrt(k), 1.3 * k, 0.06 * Math.sqrt(k), KIT.std('#2a3038', 0.6, 0.4), x, 0.65 * k, z, false);
+  const p = KIT.panel(g, 1.4 * k, 0.52 * k, KIT.texMat(tex, 1.1, 0.9), x, 1.45 * k, z + 0.04, 0.35);
+  p.material.side = THREE.DoubleSide;
+}
+// 街角電子招牌：每間店共用同一組幾何與材質，只換一張貼圖（名稱、市值、收盤價）；灰色機身，正反兩面都有字
+const PYLON = { w: 2.0, h: 4.0 };
+let pylonParts = null;
+function pylonTexture(s) {
+  return KIT.canvasTex(256, 512, (c, W, H) => {
+    const tone_ = s.last.change > 0 ? UP : s.last.change < 0 ? DOWN : '#e6ebef';
+    c.fillStyle = '#20252b'; c.fillRect(0, 0, W, H);
+    c.fillStyle = '#69727c'; c.fillRect(0, 0, W, 150); // 灰色標題區（取代參考圖的綠色與 logo）
+    c.fillStyle = '#c9d2d9'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = `500 30px ${KIT.MONO}`; c.fillText(s.code, W / 2, 34);
+    c.fillStyle = '#ffffff'; KIT.fitText(c, s.name, W * 0.88, 64, 800); c.fillText(s.name, W / 2, 98);
+    c.fillStyle = '#8d97a1'; c.fillRect(0, 150, W, 6);
+    c.fillStyle = '#9aa5b0'; c.font = `600 30px ${KIT.FONT}`; c.fillText('市值', W / 2, 196);
+    c.fillStyle = '#e6ebef'; KIT.fitText(c, fmtCap(s.cap), W * 0.9, 66, 500, KIT.MONO); c.fillText(fmtCap(s.cap), W / 2, 268);
+    c.fillStyle = '#8d97a1'; c.fillRect(30, 322, W - 60, 3);
+    c.fillStyle = '#9aa5b0'; c.font = `600 30px ${KIT.FONT}`; c.fillText('收盤價', W / 2, 364);
+    c.fillStyle = tone_; KIT.fitText(c, fmtPrice(s.last.close), W * 0.9, 98, 500, KIT.MONO); c.fillText(fmtPrice(s.last.close), W / 2, 450);
+  });
+}
+function addPylon(g, s, x, z) {
+  if (!pylonParts) pylonParts = { // 共用：每間店只多一張貼圖
+    post: new THREE.BoxGeometry(0.36, 1.5, 0.36), body: new THREE.BoxGeometry(PYLON.w + 0.16, PYLON.h + 0.16, 0.3),
+    postMat: KIT.std('#59616a', 0.5, 0.5), bodyMat: KIT.std('#3b424a', 0.5, 0.5),
+  };
+  const P = pylonParts, mk = (geo, mat, y) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; g.add(m); };
+  mk(P.post, P.postMat, 0.75);
+  mk(P.body, P.bodyMat, 1.5 + PYLON.h / 2);
+  const mat = KIT.texMat(pylonTexture(s), 1.1, 0.85), cy = 1.5 + PYLON.h / 2;
+  KIT.panel(g, PYLON.w, PYLON.h, mat, x, cy, z + 0.16);
+  KIT.panel(g, PYLON.w, PYLON.h, mat, x, cy, z - 0.16, Math.PI);
+  KIT.addPool(g, x, z + 1, 6, 0.9);
+}
+// 預留空地：深色地面、前方圍籬與告示牌，等之後設計店面
+function buildReserved(b, name, color) {
+  const g = new THREE.Group(), post = KIT.std('#2a3038', 0.6, 0.4), rail = KIT.std('#c9d2d9', 0.5, 0.3);
+  g.position.set(b.x, KIT.DIM.curbY, b.z);
+  KIT.B(g, 23, 0.05, 23, KIT.std('#1a2218', 0.95), 0, 0.035, 0, false);
+  KIT.B(g, 23, 0.06, 0.35, KIT.std(color, 0.6), 0, 0.06, 11.4, false);
+  for (let x = -11; x <= 11; x += 2.75) if (Math.abs(x) > 2) KIT.B(g, 0.12, 1.3, 0.12, post, x, 0.65, 11.4, false);
+  for (const y of [0.55, 1.05]) for (const sx of [-1, 1]) KIT.B(g, 8.6, 0.07, 0.07, rail, sx * 6.7, y, 11.4, false);
+  smallSign(g, `${name} 預留`, color, -5, 10.4, 2.6);
+  smallSign(g, '籌備中', color, 5, 10.4, 2.6);
+  scene.add(g);
+}
+function buildPark(b) {
+  const g = new THREE.Group();
+  g.position.set(b.x, KIT.DIM.curbY, b.z);
+  for (const [x, z, ry] of [[-3.6, 1.5, Math.PI / 2], [3.6, 1.5, -Math.PI / 2], [-3.6, 6.5, Math.PI / 2], [3.6, 6.5, -Math.PI / 2]]) KIT.addProp(g, 'bench', x, z, ry);
+  for (const [x, z] of [[-11, -9], [11, -9], [-11, 11], [11, 11]]) KIT.addProp(g, 'planter', x, z);
+  for (const [x, z] of [[-10, 2], [10, 2]]) { KIT.addProp(g, 'lamp', x, z); KIT.addPool(g, x, z, 7, 1.1); }
+  KIT.addProp(g, 'bin', 2.2, -8);
+  smallSign(g, '鎮民公園', '#46704a', -3.6, -11.5, 2.2);
+  const n = Math.min(PARK_MAX, raw?.meta?.limitDown?.stocks ?? 0);
+  smallSign(g, `跌停 ${n} 檔`, DOWN, 3.6, -11.5, 2.2);
+  buildParkCrowd(g, n);
+  parkPos = { x: b.x, z: b.z };
+  scene.add(g);
+}
+// 公園紙箱區：每 1 檔股票跌停＝1 個人（上限 PARK_MAX），坐著或躺著在紙箱上；紙箱共用一個幾何
+const PARK_MAX = 40;
+let parkPos = null;
+function buildParkCrowd(g, n) {
+  if (!n) return;
+  const rand = KIT.rng(77), avoid = [], spots = [];
+  for (const x of [-7, 0, 7]) for (const z of [-1, 4, 9]) avoid.push([x, z, 2.6]); // 樹
+  for (const [x, z] of [[-3.6, 1.5], [3.6, 1.5], [-3.6, 6.5], [3.6, 6.5], [-10, 2], [10, 2], [2.2, -8], [-11, -9], [11, -9], [-11, 11], [11, 11], [-3.6, -11.5], [3.6, -11.5]]) avoid.push([x, z, 1.9]);
+  for (let tries = 0; spots.length < n && tries < 4000; tries++) {
+    const x = (rand() * 2 - 1) * 12, z = (rand() * 2 - 1) * 12;
+    if (avoid.some(([ax, az, r]) => Math.hypot(x - ax, z - az) < r) || spots.some(([sx, sz]) => Math.hypot(x - sx, z - sz) < 3.0)) continue;
+    spots.push([x, z, rand() * Math.PI * 2, rand() < 0.5]);
+  }
+  const boxes = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 0.06, 1), KIT.std('#ffffff', 0.95), spots.length * 2);
+  const people = KIT.createVoxelPeople(spots.length);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), col = new THREE.Color(), tans = ['#b88a55', '#a87a48', '#c49a64', '#9c7140'];
+  let bi = 0;
+  const put = (x, z, w, d, yaw) => {
+    boxes.setMatrixAt(bi, m.compose(new THREE.Vector3(x, 0.035, z), q.setFromAxisAngle(up, yaw), new THREE.Vector3(w, 1, d)));
+    boxes.setColorAt(bi, col.set(tans[bi % tans.length])); bi++;
+  };
+  spots.forEach(([x, z, yaw, lie], i) => {
+    put(x, z, lie ? 2.3 : 1.5, lie ? 1.2 : 1.5, yaw); // 人身下鋪紙箱
+    put(x + Math.cos(yaw + 1) * 0.5, z - Math.sin(yaw + 1) * 0.5, 0.9, 0.7, yaw + 0.6); // 旁邊再疊一片
+    people.setLook(i, KIT.randomLook(rand));
+    if (lie) { // 側躺：身體沿本地 x 軸；腳點位置要往中心偏移 0.87，人才躺在紙箱中央
+      people.setPose(i, { x: x + 0.87 * Math.cos(yaw), y: 0.17, z: z - 0.87 * Math.sin(yaw), yaw, roll: Math.PI / 2 });
+    } else people.setPose(i, { x, y: -0.7, z, yaw, sit: 1.45 }); // 坐姿：腿往前、身體下降到髖部貼地
+  });
+  boxes.count = bi; boxes.receiveShadow = true; boxes.instanceMatrix.needsUpdate = true; boxes.instanceColor.needsUpdate = true;
+  people.commit();
+  g.add(boxes, people.group);
+}
+function buildTown() {
+  // 格子座標 [欄 c, 列 r]；r＝2 是最前排。5×3 的正中心 [2, 1] 給公園
+  const PARK = [2, 1], NVIDIA = [3, 1], SPARE = [[0, 0], [4, 0]]; // NVIDIA：預留空地（之後設計店面、串資料）；SPARE：備用空格
+  const street = KIT.createStreet({ cols: 5, rows: 3, ring: 1, seed: 5, parks: [PARK] });
+  scene.add(street.group);
+  buildPark(street.parks[0]);
+  const at = ([c, r]) => street.lots.find(l => l.c === c && l.r === r);
+  buildReserved(at(NVIDIA), 'NVIDIA', '#9aa5b0'); // 灰色（不用 NVIDIA 綠）
+  const skip = [NVIDIA, ...SPARE].map(at);
+  const lots = street.lots.filter(l => !skip.includes(l)).sort((a, b) => b.z - a.z || a.x - b.x);
+  shops = stocks.map((s, i) => {
+    const lot = lots[i], info = shopInfoFor(s);
+    const g = KIT.createShop(s.style, info, { props: false });
+    g.position.set(lot.x, KIT.DIM.curbY, lot.z);
+    // 廣場小物：兩條隊伍佔掉前方廣場，中間 2 公尺是出店走道；小物放在四角與人行道邊
+    for (const [x, z] of [[-11.2, 3.8], [-11.2, 11.3], [11.2, 11.3], [11.2, 3.8]]) { KIT.addProp(g, 'lamp', x, z); KIT.addPool(g, x, z, 7, 1.1); }
+    for (const x of [-8.6, -5.7, 5.7, 8.6]) KIT.addProp(g, 'bench', x, 11.0);
+    for (const x of [-11, 11]) KIT.addProp(g, 'planter', x, 6.4);
+    KIT.addProp(g, 'bin', 3.4, 11.4);
+    KIT.addProp(g, 'hydrant', -10.6, 14.3);
+    KIT.sandwichBoard(g, KIT.shopInfo(info), -3.2, 11.3);
+    smallSign(g, '法人買進', UP, 5.2, 10.4);
+    smallSign(g, '法人賣出', DOWN, -5.2, 10.4);
+    addPylon(g, s, -13, 13.2); // 左前街角
+    scene.add(g);
+    // 右邊買方、左邊賣方（鏡像）；inner 1.1＝兩邊各往外移，中間留走道
+    const buy = KIT.createQueueMaze({ color: UP, inner: 1.1 }), sell = KIT.createQueueMaze({ color: DOWN, inner: 1.1 });
+    buy.group.position.copy(g.position);
+    sell.group.position.copy(g.position);
+    sell.group.scale.x = -1;
+    scene.add(buy.group, sell.group);
+    return { s, lot, g, buy, sell };
+  });
+  KIT.finalize(scene);
+  KIT.setDayNight(1);
+  // 人流與車流：路人經過右前角排買方、左前角排賣方；叫號進店、從中間走道出來
+  const coarse = matchMedia('(pointer: coarse)').matches;
+  sim = createTownSim({
+    blocks: street.blocks, seed: 21, carScale: coarse ? 0.5 : 1,
+    shops: shops.map(({ s, lot, buy, sell }) => ({
+      lot, accent: s.color, interval: s.interval, walkers: s.walkers, cars: s.cars,
+      queues: [{ maze: buy, mirror: 1, target: s.qBuy, color: UP }, { maze: sell, mirror: -1, target: s.qSell, color: DOWN }],
+    })),
+  });
+  scene.add(sim.group);
+  sim.setView(camera, controls.target);
+  sim.setShutter(clk.shutter);
+  if (coarse) sim.setDetail(2);
+  sim.prewarm(15); // 預熱：開場就是流動中的樣子
+}
+
+// ==== [鏡頭與巡店] ====
+let current = 0, fly = null;
+const DEFAULT_VIEW = () => new THREE.Vector3().setFromSpherical(new THREE.Spherical(78 * (innerWidth < innerHeight ? 1.6 : 1), 0.94, 0.61));
+const shopTarget = i => new THREE.Vector3(shops[i].lot.x, 2.4, shops[i].lot.z + 4.5);
+const ease = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+function setParkMode(on) { document.body.classList.toggle('park-mode', on); $('#parkBtn').setAttribute('aria-pressed', String(on)); }
+function goPark() {
+  if (!parkPos) return;
+  setParkMode(true);
+  document.querySelectorAll('#rank .row').forEach(el => el.setAttribute('aria-current', 'false'));
+  const ld = raw?.meta?.limitDown, n = ld ? Math.min(PARK_MAX, ld.stocks) : 0;
+  $('#pDate').textContent = ld ? `跌停統計　${ld.date}` : '';
+  $('#pNum').textContent = ld ? `${ld.stocks} 檔` : '—';
+  $('#pNote').textContent = ld ? `公園裡有 ${n} 人坐著或躺在紙箱上，1 檔股票跌停＝1 人（上限 ${PARK_MAX} 人）。整體市場（含 ETF、權證等）跌停共 ${ld.market} 檔，不計入人數。` : '目前沒有跌停資料。';
+  const toT = new THREE.Vector3(parkPos.x, 1.6, parkPos.z + 1), off = DEFAULT_VIEW().multiplyScalar(0.95);
+  if (REDUCED) { controls.target.copy(toT); camera.position.copy(toT).add(off); fly = null; }
+  else fly = { t: 0, fromT: controls.target.clone(), toT, off };
+}
+function goTo(i, instant = false, reset = false) {
+  setParkMode(false);
+  current = (i + shops.length) % shops.length;
+  const toT = shopTarget(current), off = reset ? DEFAULT_VIEW() : camera.position.clone().sub(controls.target);
+  if (instant || REDUCED) { controls.target.copy(toT); camera.position.copy(toT).add(off); fly = null; }
+  else fly = { t: 0, fromT: controls.target.clone(), toT, off };
+  updateUI();
+}
+controls.addEventListener('start', () => { fly = null; });
+// 平移範圍限制在店面外圍 PAN_MARGIN 以內，避免移出小鎮找不到路
+const PAN_MARGIN = 30;
+let panBox = null;
+function clampPan() {
+  if (!shops.length) return;
+  if (!panBox) {
+    const xs = shops.map(s => s.lot.x), zs = shops.map(s => s.lot.z);
+    panBox = { x0: Math.min(...xs) - PAN_MARGIN, x1: Math.max(...xs) + PAN_MARGIN, z0: Math.min(...zs) - PAN_MARGIN, z1: Math.max(...zs) + PAN_MARGIN };
+  }
+  const T = controls.target;
+  const dx = THREE.MathUtils.clamp(T.x, panBox.x0, panBox.x1) - T.x, dz = THREE.MathUtils.clamp(T.z, panBox.z0, panBox.z1) - T.z;
+  if (dx || dz) { T.x += dx; T.z += dz; camera.position.x += dx; camera.position.z += dz; }
+}
+
+// ==== [介面] ====
+function buildBoard() {
+  const ol = $('#rank');
+  ol.textContent = '';
+  shops.forEach(({ s }, i) => {
+    const li = document.createElement('li'), b = document.createElement('button');
+    b.type = 'button'; b.className = 'row';
+    b.innerHTML = `<span class="r-rank">${String(s.rank).padStart(2, '0')}</span><span class="r-dot"></span><span class="r-name"></span><span class="r-val">${fmtYi(s.last.value)}</span><span class="r-pct ${tone(s.pct)}">${pctText(s.pct)}</span>`;
+    b.querySelector('.r-dot').style.background = s.color;
+    b.querySelector('.r-name').textContent = `${s.code} ${s.name}`;
+    b.addEventListener('click', () => goTo(i));
+    li.appendChild(b);
+    ol.appendChild(li);
+  });
+}
+function updateUI() {
+  const { s } = shops[current], L = s.last;
+  $('#counter').textContent = `${current + 1} / ${shops.length}`;
+  $('#cRank').textContent = `成交金額第 ${s.rank} 名　${L.date}`;
+  const chip = $('#cChip');
+  chip.textContent = raw.meta.source === 'TWSE' ? '證交所資料' : '示意資料';
+  chip.className = 'chip' + (raw.meta.source === 'TWSE' ? '' : ' sample');
+  $('#cName').textContent = s.name;
+  $('#cCode').textContent = `${s.code}　${s.kind || ''}`;
+  $('#cClose').textContent = fmtPrice(L.close);
+  $('#cClose').className = 'kpi-num ' + tone(L.change || 0);
+  const chg = $('#cChg');
+  chg.textContent = `${fmtSigned(L.change || 0)}　${pctText(s.pct)}`;
+  chg.className = 'chg ' + tone(L.change || 0);
+  const mini = $('#cMini');
+  mini.textContent = `${fmtPrice(L.close)}　${pctText(s.pct)}`;
+  mini.className = 'chg ' + tone(L.change || 0);
+  $('#cVal').textContent = fmtYi(L.value);
+  $('#cVol').textContent = fmtLots(L.volume);
+  $('#cOHL').textContent = `${fmtPrice(L.open)}／${fmtPrice(L.high)}／${fmtPrice(L.low)}`;
+  if (s.inst) {
+    const net = s.inst.net;
+    $('#cInst').innerHTML = `<span class="${tone(net)}">${net >= 0 ? '買超' : '賣超'} ${fmtLots(Math.abs(net))}</span>`;
+    const tot = s.instVal.buy + s.instVal.sell || 1;
+    $('#iBuy').style.width = `${(s.instVal.buy / tot) * 100}%`;
+    $('#iSell').style.width = `${(s.instVal.sell / tot) * 100}%`;
+    $('#lBuy').textContent = `買進 ${fmtLots(s.inst.buy)}（${fmtYi(s.instVal.buy)}）`;
+    $('#lSell').textContent = `賣出 ${fmtLots(s.inst.sell)}（${fmtYi(s.instVal.sell)}）`;
+  } else {
+    $('#cInst').textContent = '尚未公布';
+    $('#iBuy').style.width = $('#iSell').style.width = '0';
+    $('#lBuy').textContent = $('#lSell').textContent = '';
+  }
+  $('#sFrom').textContent = s.seriesDates.length > 1 ? (s.seriesDates[0] || '').slice(5) : '';
+  $('#sTo').textContent = (s.seriesDates.at(-1) || '').slice(5);
+  document.querySelectorAll('#rank .row').forEach((el, i) => el.setAttribute('aria-current', String(i === current)));
+  drawSpark(s);
+}
+function drawSpark(s) {
+  const cv = $('#spark'), dpr = Math.min(window.devicePixelRatio || 1, 2), W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const v = s.series, n = v.length, slots = Math.max(n, 30), max = Math.max(...v) * 1.06, bw = W / slots; // 不足 30 天時靠右排列
+  v.forEach((x, i) => {
+    const h = Math.max(2, (x / max) * (H - 2)), t = s.seriesTone[i];
+    g.globalAlpha = i === n - 1 ? 1 : 0.7;
+    g.fillStyle = t > 0 ? UP : t < 0 ? DOWN : FLAT;
+    g.fillRect((slots - n + i) * bw + 1, H - h, Math.max(1, bw - 2), h);
+  });
+  g.globalAlpha = 1;
+}
+// 資訊卡收合：手機預設收合，使用者的選擇記在 localStorage
+function setCardCollapsed(on) {
+  $('#card').classList.toggle('collapsed', on);
+  const b = $('#cToggle');
+  b.setAttribute('aria-expanded', String(!on));
+  b.setAttribute('aria-label', on ? '展開資訊' : '收合資訊');
+  try { localStorage.setItem('cardCollapsed', on ? '1' : '0'); } catch {}
+  if (!on) drawSpark(shops[current].s);
+}
+function initCardToggle() {
+  let saved = null;
+  try { saved = localStorage.getItem('cardCollapsed'); } catch {}
+  setCardCollapsed(saved === null ? matchMedia('(max-width:760px)').matches : saved === '1');
+  $('#cToggle').addEventListener('click', () => setCardCollapsed(!$('#card').classList.contains('collapsed')));
+}
+function bindEvents() {
+  initCardToggle();
+  const ld = raw?.meta?.limitDown;
+  $('#parkCnt').textContent = ld ? `跌停 ${Math.min(PARK_MAX, ld.stocks)} 檔` : '';
+  $('#parkBtn').addEventListener('click', goPark);
+  $('#prev').addEventListener('click', () => goTo(current - 1));
+  $('#next').addEventListener('click', () => goTo(current + 1));
+  $('#playBtn').addEventListener('click', togglePause);
+  $('#hourBack').addEventListener('click', () => shiftHour(-1));
+  $('#hourFwd').addEventListener('click', () => shiftHour(1));
+  $('#dayNightBtn').addEventListener('click', toggleDayNight);
+  $('#shutterSeg').addEventListener('click', e => { const b = e.target.closest('button[data-s]'); if (b) setShutter(Number(b.dataset.s)); });
+  $('#cycleBtn').addEventListener('click', () => setCycle(!clk.cycle));
+  $('#speedSeg').addEventListener('click', e => { const b = e.target.closest('button[data-v]'); if (b) setSpeed(Number(b.dataset.v)); });
+  addEventListener('keydown', e => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); goTo(current + 1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); goTo(current - 1); }
+    else if (e.key === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePause(); }
+    else if (e.key === '-' || e.key === '_') shiftHour(-1);
+    else if (e.key === '=' || e.key === '+') shiftHour(1);
+    else if (e.key === 'e' || e.key === 'E') setShutter(SHUTTERS[(SHUTTERS.indexOf(clk.shutter) + 1) % SHUTTERS.length]);
+    else if (e.key === 'n' || e.key === 'N') setCycle(!clk.cycle);
+    else if (e.key.length === 1 && e.key >= '1' && e.key <= '4') setSpeed(SPEEDS[Number(e.key) - 1]);
+    else if (e.key === 'c' || e.key === 'C') goTo(current, false, true);
+    else if (e.key === 'p' || e.key === 'P') goPark();
+  });
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+    composer.setSize(innerWidth, innerHeight);
+    setTilt();
+    drawSpark(shops[current].s);
+  });
+}
+
+// ==== [時間與日夜] 模擬時鐘隨播放速度前進（1× 為真實時間）；依太陽高度混合夜晚、黃昏、白天 ====
+const clk = { hour: 21, shown: 21, cycle: true, shutter: 0.6 };
+const SHUTTERS = [0, 0.6, 1.8, 4];
+const MOON_OFF = new THREE.Vector3(-45, 95, 60), SUN_OFF = new THREE.Vector3(), dirOff = MOON_OFF.clone();
+const TIME = {
+  bgN: new THREE.Color('#0b111b'), bgD: new THREE.Color('#a9c9e6'), bgT: new THREE.Color('#3d2e40'),
+  skyN: new THREE.Color('#4a5f94'), skyD: new THREE.Color('#d6e8ff'), skyT: new THREE.Color('#eaa27c'),
+  gndN: new THREE.Color('#2b2119'), gndD: new THREE.Color('#8a7a62'), gndT: new THREE.Color('#4d372a'),
+  sunD: new THREE.Color('#fff1dc'), sunT: new THREE.Color('#ffae70'), moon: new THREE.Color('#aab9ff'),
+};
+const clamp01 = x => Math.max(0, Math.min(1, x));
+const smooth01 = (e0, e1, x) => { const t = clamp01((x - e0) / (e1 - e0)); return t * t * (3 - 2 * t); };
+function applyTime(h) {
+  const elev = Math.sin(((h - 6) / 12) * Math.PI);
+  const n = smooth01(0.22, -0.12, elev), tw = clamp01(1 - Math.abs(elev) / 0.32) * 0.75; // n：1＝夜；tw：黃昏／清晨色調
+  scene.background.copy(TIME.bgD).lerp(TIME.bgN, n).lerp(TIME.bgT, tw);
+  scene.fog.color.copy(scene.background);
+  hemi.color.copy(TIME.skyD).lerp(TIME.skyN, n).lerp(TIME.skyT, tw * 0.6);
+  hemi.groundColor.copy(TIME.gndD).lerp(TIME.gndN, n).lerp(TIME.gndT, tw * 0.5);
+  hemi.intensity = 2.5 - 0.3 * n;
+  const az = ((h - 6) / 12) * Math.PI;
+  SUN_OFF.set(Math.cos(az) * 70, 25 + 90 * Math.max(elev, 0), 55);
+  dirOff.copy(SUN_OFF).lerp(MOON_OFF, n);
+  moon.color.copy(TIME.sunD).lerp(TIME.sunT, tw).lerp(TIME.moon, n);
+  moon.intensity = 3.0 * smooth01(-0.06, 0.2, elev) * (1 - n) + 0.9 * n;
+  renderer.toneMappingExposure = 0.95 + 0.1 * n;
+  stageLight.intensity = 25 + 155 * n;
+  bloom.strength = 0.3 + 0.3 * n;
+  bloom.threshold = 1.05 - 0.23 * n;
+  KIT.setDayNight(n);
+  sim.setNight(n);
+}
+const phaseName = h => (h >= 5 && h < 7 ? '清晨' : h >= 7 && h < 16.5 ? '白天' : h >= 16.5 && h < 19 ? '黃昏' : '夜晚');
+let clockT = 1;
+function clockTick(dt) {
+  clockT += dt;
+  if (clockT < 0.25) return;
+  clockT = 0;
+  const h = clk.shown, hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+  $('#clock').textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  $('#dayPhase').textContent = phaseName(h);
+  $('#dayNightBtn').textContent = isNight(clk.hour) ? '☀ 白天' : '☾ 夜晚'; // 按鈕顯示「按下去會變成什麼」
+}
+const isNight = h => !(h >= 6 && h < 18);
+const toggleDayNight = () => { clk.hour = isNight(clk.hour) ? 13 : 21; }; // 夜晚→白天 13:00；白天→夜晚 21:00（時鐘會平滑過渡）
+const shiftHour = d => { clk.hour = (clk.hour + d + 24) % 24; };
+const setShutter = v => { clk.shutter = v; sim.setShutter(v); syncPlayer(); };
+const setCycle = on => { clk.cycle = on; syncPlayer(); };
+
+// ==== [播放控制] 暫停與 1×／10×／30×／60× ====
+const SPEEDS = [1, 10, 30, 60];
+const play = { speed: matchMedia('(max-width:760px)').matches ? 10 : 1, paused: REDUCED }; // 手機版預設 10×，桌面 1×
+function syncPlayer() {
+  const b = $('#playBtn');
+  b.textContent = play.paused ? '▶' : '❚❚';
+  b.setAttribute('aria-label', play.paused ? '繼續播放' : '暫停');
+  document.querySelectorAll('#speedSeg button[data-v]').forEach(x => x.setAttribute('aria-pressed', String(!play.paused && Number(x.dataset.v) === play.speed)));
+  document.querySelectorAll('#shutterSeg button').forEach(x => x.setAttribute('aria-pressed', String(Number(x.dataset.s) === clk.shutter)));
+  $('#cycleBtn').setAttribute('aria-pressed', String(clk.cycle));
+}
+const setSpeed = v => { play.speed = v; play.paused = false; syncPlayer(); };
+const togglePause = () => { play.paused = !play.paused; syncPlayer(); };
+
+// ==== [主迴圈與啟動] ====
+const clock = new THREE.Clock();
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  if (fly) {
+    fly.t = Math.min(1, fly.t + dt / 1.2);
+    controls.target.lerpVectors(fly.fromT, fly.toT, ease(fly.t));
+    camera.position.copy(controls.target).add(fly.off);
+    if (fly.t >= 1) fly = null;
+  }
+  controls.update();
+  clampPan();
+  const T = controls.target;
+  moon.position.copy(T).add(dirOff);
+  moon.target.position.copy(T);
+  stageLight.position.set(T.x + 2, 7.5, T.z + 8);
+  const simDt = play.paused ? 0 : dt * play.speed; // 縮時：人流與車流一起加速
+  sim.step(simDt);
+  sim.update(Math.min(simDt, 0.5));
+  if (clk.cycle && simDt > 0) clk.hour = (clk.hour + simDt / 3600) % 24; // 日夜循環：時鐘跟著模擬時間走
+  let dh = clk.hour - clk.shown;
+  if (dh > 12) dh -= 24; else if (dh < -12) dh += 24;
+  clk.shown = (clk.shown + dh * (1 - Math.exp(-dt * 6)) + 24) % 24; // ±1 小時時平滑過渡
+  applyTime(clk.shown);
+  clockTick(dt);
+  KIT.animate(t);
+  composer.render();
+  if (!window.__ready) { window.__ready = true; $('#loading').classList.add('hide'); }
+}
+async function main() {
+  raw = await loadData();
+  stocks = prepare(raw);
+  if (!stocks.length) throw new Error('資料裡沒有任何股票');
+  try { await Promise.race([document.fonts.load('800 100px "Outfit"'), new Promise(r => setTimeout(r, 2500))]); } catch (e) { /* 用系統字型 */ }
+  buildTown();
+  buildBoard();
+  bindEvents();
+  syncPlayer();
+  window.__town = { simulate: sec => { for (let x = sec; x > 0; x -= 1) sim.step(Math.min(1, x)); sim.update(0); }, stats: () => sim.stats(), traffic: () => sim.traffic(), modes: () => sim.modes(), set: o => { if (o.hour !== undefined) clk.hour = clk.shown = o.hour; if (o.shutter !== undefined) setShutter(o.shutter); } };
+  $('#src').textContent = raw.meta.source === 'TWSE' ? `資料來源：臺灣證券交易所　資料日期 ${raw.meta.as_of}` : '目前是示意資料（數字為虛構，不是真實行情）';
+  goTo(0, true, true);
+  frame();
+}
+main().catch(err => {
+  console.error(err);
+  window.__ready = true;
+  $('#loadMsg').textContent = `無法載入：${err.message}。請用本機伺服器開啟（例如 python3 -m http.server 8000）。`;
+});
+</script>
+</body>
+</html>
